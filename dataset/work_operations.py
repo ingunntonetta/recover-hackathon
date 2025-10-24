@@ -5,7 +5,6 @@ import typing
 from pathlib import Path
 from urllib.error import URLError
 
-import kaggle
 import numpy as np
 import polars as pl
 import torch
@@ -204,7 +203,9 @@ class WorkOperationsDataset(BaseDataset):
             return
 
         load_dotenv()
-
+        
+        # Import kaggle only when downloading
+        import kaggle
         kaggle.api.authenticate()
         for filename in self.resources:
             try:

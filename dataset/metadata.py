@@ -4,7 +4,6 @@ import typing
 from pathlib import Path
 from urllib.error import URLError
 
-import kaggle
 import polars as pl
 import torch
 from dotenv import load_dotenv
@@ -60,7 +59,10 @@ class MetadataDataset(BaseDataset):
             return
 
         load_dotenv()
-
+        
+        # Import kaggle only when downloading
+        # Import kaggle only when downloading
+        import kaggle
         kaggle.api.authenticate()
         for filename in self.resources:
             try:

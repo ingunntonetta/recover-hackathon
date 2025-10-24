@@ -208,3 +208,6 @@ __marimo__/
 
 data/*.csv
 submissions/*.csv
+best_model.pth
+
+.DS_Store
