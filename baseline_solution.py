@@ -11,6 +11,8 @@ from dataset.hackathon import HackathonDataset
 from dataset.collate import collate_fn
 from metrics import normalized_rooms_score
 from tqdm import tqdm
+# At the top of the file:
+from load_features import load_ticket_features
 
 
 class BaselineModel(nn.Module):
@@ -104,7 +106,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
     return total_loss / len(dataloader)
 
 
-def validate(model, dataloader, device, threshold=0.5):
+def validate(model, dataloader, device, threshold=0.3):
     model.eval()
     all_preds = []
     all_targets = []
