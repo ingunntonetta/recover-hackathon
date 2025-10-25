@@ -1,24 +1,24 @@
-"""
-Baseline Solution for Recover Hackathon - FIXED VERSION
-This implements a simple neural network baseline using the provided dataloader
-"""
+
+import sys
+import os
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import numpy as np
 from torch.utils.data import DataLoader
 from dataset.hackathon import HackathonDataset
 from dataset.collate import collate_fn
 from metrics import normalized_rooms_score
 from tqdm import tqdm
-# At the top of the file:
-from load_features import load_ticket_features
 
 
 class BaselineModel(nn.Module):
     """Simple feedforward model with context aggregation"""
     
-    def __init__(self, num_operations=388, num_room_types=11, hidden_dim=512):
+    def __init__(self, num_operations=388, num_room_types=11, metadata_dim = 19, hidden_dim=512):
         super().__init__()
         
         # Input: operations (388) + room type (11) + aggregated context
@@ -36,21 +36,27 @@ class BaselineModel(nn.Module):
             nn.BatchNorm1d(hidden_dim),
         )
         
-        # Combine room and context
+        self.metadata_encoder = nn.Sequential(
+            nn.Linear(metadata_dim, hidden_dim//2),
+            nn.ReLU(),
+            nn.BatchNorm1d(hidden_dim//2)
+        )
+        
+        combined_dim = hidden_dim + hidden_dim + hidden_dim // 2  # room + context + metadata
         self.combiner = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Linear(combined_dim, hidden_dim),
             nn.ReLU(),
             nn.BatchNorm1d(hidden_dim),
             nn.Dropout(0.3),
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
             nn.Dropout(0.2),
-        )
+)
         
         # Output layer
         self.classifier = nn.Linear(hidden_dim // 2, num_operations)
         
-    def forward(self, x, context, context_mask):
+    def forward(self, x, context, context_mask, metadata):
         """
         Args:
             x: (batch_size, num_operations + num_room_types) - current room
@@ -76,11 +82,9 @@ class BaselineModel(nn.Module):
         context_count = context_mask.sum(dim=1, keepdim=True).float().clamp(min=1)
         context_aggregated = context_sum / context_count
         
-        # Combine
-        combined = torch.cat([room_features, context_aggregated], dim=1)
+        metadata_features = self.metadata_encoder(metadata)
+        combined = torch.cat([room_features, context_aggregated, metadata_features], dim=1)
         features = self.combiner(combined)
-        
-        # Predict
         logits = self.classifier(features)
         return logits
 
@@ -94,9 +98,10 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
         y = batch["Y"].to(device).float()
         context = batch["context"].to(device)
         context_mask = batch["context_mask"].to(device)
-        
+        metadata = batch["metadata"].to(device)
+
         optimizer.zero_grad()
-        outputs = model(x, context, context_mask)
+        outputs = model(x, context, context_mask, metadata)
         loss = criterion(outputs, y)
         loss.backward()
         optimizer.step()
@@ -106,7 +111,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
     return total_loss / len(dataloader)
 
 
-def validate(model, dataloader, device, threshold=0.3):
+def validate(model, dataloader, device, threshold=0.2):
     model.eval()
     all_preds = []
     all_targets = []
@@ -117,8 +122,9 @@ def validate(model, dataloader, device, threshold=0.3):
             y = batch["Y"].to(device)
             context = batch["context"].to(device)
             context_mask = batch["context_mask"].to(device)
-            
-            outputs = model(x, context, context_mask)
+            metadata = batch["metadata"].to(device)
+
+            outputs = model(x, context, context_mask, metadata)
             probs = torch.sigmoid(outputs)
             
             # Convert to predictions
@@ -135,12 +141,15 @@ def validate(model, dataloader, device, threshold=0.3):
     score = normalized_rooms_score(all_preds, all_targets)
     return score
 
+def score_function(engine):
+    val_loss = engine.state.metrics['nll']
+    return -val_loss
 
 def main():
     # Configuration
-    batch_size = 32
-    num_epochs = 20
-    learning_rate = 0.001
+    batch_size = 48
+    num_epochs = 30
+    learning_rate = 5e-4
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     print(f"Using device: {device}")
@@ -171,7 +180,13 @@ def main():
     
     # Loss and optimizer
     # Use BCEWithLogitsLoss for multi-label classification
-    criterion = nn.BCEWithLogitsLoss()
+    
+    op_counts = frequency_analysis.label_counts
+    class_weights = 1.0 / (op_counts + 1e-3)
+    class_weights = np.clip(class_weights, 1, 100)
+
+    class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=class_weights_tensor)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     
     # Learning rate scheduler (removed verbose parameter for compatibility)
@@ -181,7 +196,8 @@ def main():
     
     # Training loop
     best_score = -float('inf')
-    
+    epochs_no_improve = 0
+    patience = 15
     print("\nStarting training...")
     for epoch in range(num_epochs):
         print(f"\n{'='*60}")
@@ -205,12 +221,16 @@ def main():
             if new_lr != old_lr:
                 print(f"Learning rate reduced: {old_lr:.6f} -> {new_lr:.6f}")
             
+
             # Save best model
             if val_score > best_score:
                 best_score = val_score
                 torch.save(model.state_dict(), "best_model.pth")
                 print(f"✓ New best score! Model saved.")
-        
+            else:
+                epochs_no_improve += 1
+                print(f"No improvement for {epochs_no_improve} validation checks.")
+            
         # Reshuffle training data with new sampling strategy every 3 epochs
         if (epoch + 1) % 3 == 0 and epoch > 0:
             print("Reshuffling training data...")
